@@ -121,31 +121,30 @@ def uniform_soup(checkpoint_dicts):
 
     # 4) Iterate over all N checkpoints exactly once
     N = len(checkpoint_dicts)
-    global_step = 0  # global iteration index
 
     model.train()  # set to training mode if you'd like
 
-    for i, ckpt_sd in enumerate(checkpoint_dicts):
-        # Zero the grads
+    # We'll do exactly (N - 1) updates, skipping the pivot checkpoint itself
+    num_checkpoints = len(checkpoint_dicts)
+    step_idx = 0  # This is used by our scheduler
+
+    # 4) Loop from i=1..(N-1), each iteration i => checkpoint i+1 in 1-based sense
+    #    Because pivot is x_1, no need to re-process it.
+    for i in range(1, num_checkpoints):
+        # Call scheduler.step() BEFORE the optimizer step so iteration i uses lr=1/i
+        scheduler.step()  # sets lr=1/(step_idx+1)
+        step_idx += 1
+
+        # difference_loss = 1/2‖w - xᵢ‖²
         optimizer.zero_grad()
-
-        # difference_loss = sum of squared diffs
-        loss = model(ckpt_sd)  # forward pass
+        loss = model(checkpoint_dicts[i])
         loss.backward()
-
-        # Step the optimizer
         optimizer.step()
 
-        # Step the scheduler *with our custom step index*
-        scheduler.step(global_step)
-        # Now increment global_step for the next iteration
-        global_step += 1
+        current_lr = optimizer.param_groups[0]['lr']
+        print(f"Iteration {step_idx}, LR={current_lr:.5f}, loss={loss.item():.5f}")
 
-        current_lr = optimizer.param_groups[0]["lr"]
-        print(f"  Iteration {global_step}, loss={loss.item():.6f}, LR={current_lr:.6f}")
-
-
-    # 5) Extract final dictionary
+    # Extract final dictionary
     final_sd = model.to_dict()
     return final_sd
 
@@ -431,3 +430,15 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+# python compare_soup.py \
+#   --input_1 /scratch3/workspace/oraundale_umass_edu-quadratic-ensembling/ansharora/QME/qme_uniform_soup_bert_sst2.pt \
+#   --input_2 /scratch3/workspace/oraundale_umass_edu-quadratic-ensembling/ansharora/Quadratic-Model-Ensembling/averaged_state_dict_bert_sst2.pth \
+#   --model bert \
+#   --soup_type uniform
+    
+
+
+# python qme.py --type uniform_soup --out_path  qme_saved_models/9C_10_qme_uniform.pt --folder /scratch3/workspace/oraundale_umass_edu-quadratic-ensembling/ojas/QME/saved_models/9C_10_Meta_CIFAR10_vit_25Epk --ranks_file None
