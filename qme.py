@@ -64,8 +64,10 @@ def load_checkpoints_as_dicts(folder_path, num_checkpoints, device='cpu'):
     """
     ckpt_files = sorted([
         f for f in os.listdir(folder_path)
-        if f.startswith("model_") and f.endswith(".pt")
+        if f.startswith("t5_rte_model_") and f.endswith(".pt")
     ])[:num_checkpoints]
+
+    print(ckpt_files)
 
     ckpt_dicts = []
     for filename in ckpt_files:
@@ -326,11 +328,11 @@ def qme(
         print(f"=== Epoch {epoch+1}/{num_epochs} ===")
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
         for i, ckpt_sd in enumerate(checkpoint_dicts):
+            scheduler.step()
             optimizer.zero_grad()
             loss = model(ckpt_sd)
             loss.backward()
             optimizer.step()
-            scheduler.step()
 
             global_step += 1
             current_lr = optimizer.param_groups[0]["lr"]
@@ -339,6 +341,120 @@ def qme(
     # 5) Return final dictionary
     final_sd = model.to_dict()
     return final_sd
+
+
+def qme_batch(
+    checkpoint_dicts,
+    num_epochs=5,
+    batch_size=8,
+    optimizer_name="sgd",
+    lr=1e-3,
+    weight_decay=0.0,
+    eps=1e-8,
+    beta1=0.9,
+    beta2=0.999
+):
+    """
+    Multi-epoch training on the difference-loss:
+       \(\frac{1}{2}\sum_{\text{params}} (w - x_i)^2\),
+    computed over mini-batches of checkpoints from 'checkpoint_dicts'.
+
+    In each iteration, a mini-batch of checkpoints is processed:
+    the loss is computed as the average loss over the batch, a gradient update is
+    taken with a harmonic learning rate schedule (i.e. \(\eta = 1/(global\_step+1)\)),
+    and the parameters move toward the uniform average of the checkpoints.
+
+    Args:
+        checkpoint_dicts (list[dict]):
+            List of raw param dicts. The first is the "pivot."
+        num_epochs (int):
+            How many epochs to run over the entire list.
+        batch_size (int):
+            Number of checkpoint dictionaries per update.
+        optimizer_name (str):
+            One of ['sgd', 'adamw', 'adagrad'].
+        lr (float): Learning rate (\(\eta\)).
+        weight_decay (float): Weight decay (\(\lambda\)).
+        eps (float): Smoothing term (\(\varepsilon\)).
+        beta1 (float): Momentum (or beta1 in AdamW).
+        beta2 (float): Beta2 for AdamW.
+
+    Returns:
+        final_sd (dict): Final dictionary of parameters after multi-epoch training.
+    """
+    import torch
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Initialize model from pivot (first checkpoint)
+    pivot_sd = checkpoint_dicts[0]
+    # pivot_sd = torch.load('/scratch3/workspace/oraundale_umass_edu-quadratic-ensembling/ansharora/Quadratic-Model-Ensembling/imagenet_ensembled_models/qme_uniform_soup_try.pt', map_location=torch.device('cpu'))['model_state_dict']
+    model = DictParamModule(pivot_sd).to(device)
+    model.train()
+
+    # Build optimizer
+    optimizer_name = optimizer_name.lower()
+    if optimizer_name == "sgd":
+        optimizer = torch.optim.SGD(
+            model.parameters(),
+            lr=lr,
+            momentum=beta1,
+            weight_decay=weight_decay
+        )
+    elif optimizer_name == "adamw":
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=lr,
+            weight_decay=weight_decay,
+            eps=eps,
+            betas=(beta1, beta2)
+        )
+    elif optimizer_name == "adagrad":
+        optimizer = torch.optim.Adagrad(
+            model.parameters(),
+            lr=lr,
+            weight_decay=weight_decay,
+            eps=eps
+        )
+    else:
+        raise ValueError("optimizer_name must be in ['sgd','adamw','adagrad']")
+
+    # Set up harmonic learning rate scheduler
+    def lr_lambda(step_idx, p=1):
+        return (1.0 / float(step_idx + 1)) ** p
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
+
+    global_step = 0
+    N = len(checkpoint_dicts)
+    
+    # Helper: generate mini-batches from checkpoint_dicts
+    def batchify(lst, bsize):
+        for i in range(0, len(lst), bsize):
+            yield lst[i:i+bsize]
+    
+
+    model.train()
+    for epoch in range(num_epochs):
+        print(f"=== Epoch {epoch+1}/{num_epochs} ===")
+        for batch in batchify(checkpoint_dicts, batch_size):
+            scheduler.step()
+            optimizer.zero_grad()
+            # Compute loss as average loss over the batch
+            batch_loss = 0.0
+            for ckpt_sd in batch:
+                batch_loss += model(ckpt_sd)
+            batch_loss = batch_loss / len(batch)
+            
+            batch_loss.backward()
+            optimizer.step()
+            global_step += 1
+
+            current_lr = optimizer.param_groups[0]["lr"]
+            print(f"  Iteration {global_step}, Batch Loss={batch_loss.item():.5f}, LR={current_lr:.6f}")
+
+
+    final_sd = model.to_dict()
+    return final_sd
+
 
 
 
@@ -355,7 +471,7 @@ def main():
     parser.add_argument("--out_path", type=str, default="harmonic_soup_sgd.pt",
                         help="Where to save final soup checkpoint.")
     parser.add_argument("--type", type=str, required=False,
-                        choices=['uniform_soup', 'greedy_soup', 'qme'], default = 'uniform_soup')
+                        choices=['uniform_soup', 'greedy_soup', 'qme', 'qme_batch'], default = 'uniform_soup')
     parser.add_argument("--optimizer", type=str, required=False,
                         choices=['sgd', 'adamw', 'adagrad'], default = 'sgd')
     parser.add_argument("--num_epochs", type=int, default = 40)
@@ -434,11 +550,32 @@ if __name__ == "__main__":
 
 
 # python compare_soup.py \
-#   --input_1 /scratch3/workspace/oraundale_umass_edu-quadratic-ensembling/ansharora/QME/qme_uniform_soup_bert_sst2.pt \
-#   --input_2 /scratch3/workspace/oraundale_umass_edu-quadratic-ensembling/ansharora/Quadratic-Model-Ensembling/averaged_state_dict_bert_sst2.pth \
-#   --model bert \
+#   --input_1 /scratch3/workspace/oraundale_umass_edu-quadratic-ensembling/ansharora/QME/qme_uniform_soup_t5_rte.pt \
+#   --input_2 /scratch3/workspace/oraundale_umass_edu-quadratic-ensembling/ansharora/Quadratic-Model-Ensembling/averaged_state_dict_t5_rte.pth \
+#   --model t5 \
 #   --soup_type uniform
     
 
 
 # python qme.py --type uniform_soup --out_path  qme_saved_models/9C_10_qme_uniform.pt --folder /scratch3/workspace/oraundale_umass_edu-quadratic-ensembling/ojas/QME/saved_models/9C_10_Meta_CIFAR10_vit_25Epk --ranks_file None
+    
+
+# python3 qme.py \
+#     --type uniform_soup \
+#     --num_checkpoints 5 \
+#     --out_path /scratch3/workspace/oraundale_umass_edu-quadratic-ensembling/ansharora/QME/qme_uniform_soup_t5_rte.pt \
+#     --ranks_file None \
+#     --folder /scratch3/workspace/oraundale_umass_edu-quadratic-ensembling/chithramvel/QE_LM_v2/QME-main/saved_models/LMs/rte/t5-base-rte-models
+
+
+# python3 qme.py \
+#     --type qme_batch \
+#     --optimizer adamw \
+#     --lr 1e-4 \
+#     --beta1 0.8 \
+#     --beta2 0.9 \
+#     --weight_decay 0.01 \
+#     --eps 1e-9 \
+#     --num_epochs 25 \
+#     --batch_size 4 \
+#     --out_path qme_adamw_soup_hyp1_try1.pt

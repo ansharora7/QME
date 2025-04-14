@@ -69,6 +69,24 @@ python3 qme.py \
     --num_checkpoints 72
 ```
 
+### ⚙️ QME Batching with AdamW Optimizer
+```bash
+python3 qme.py \
+    --type qme_batch \
+    --optimizer adamw \
+    --lr 1e-4 \
+    --beta1 0.8 \
+    --beta2 0.9 \
+    --weight_decay 0.01 \
+    --eps 1e-9 \
+    --num_epochs 25 \
+    --batch_size 4 \
+    --out_path qme_adamw_soup_hyp1_try1.pt \
+    --folder model-soups/models \
+    --ranks_file imagenet_ckpts_ranks_imagenetv2.jsonl \
+    --num_checkpoints 72
+```
+
 
 ## ⚠️ Warnings
 
