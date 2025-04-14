@@ -326,7 +326,7 @@ def qme(
     # 4) Multi-epoch loop
     for epoch in range(num_epochs):
         print(f"=== Epoch {epoch+1}/{num_epochs} ===")
-        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
+        # scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
         for i, ckpt_sd in enumerate(checkpoint_dicts):
             scheduler.step()
             optimizer.zero_grad()
